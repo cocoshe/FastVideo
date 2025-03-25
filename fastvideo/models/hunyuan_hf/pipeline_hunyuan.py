@@ -574,6 +574,8 @@ class HunyuanVideoPipeline(DiffusionPipeline, HunyuanVideoLoraLoaderMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
+        tokens = self.tokenizer.tokenize(self.tokenizer.decode(self.tokenizer.encode(prompt)))
+
         # 3. Encode input prompt
         prompt_embeds, pooled_prompt_embeds, prompt_attention_mask = self.encode_prompt(
             prompt=prompt,
@@ -654,6 +656,8 @@ class HunyuanVideoPipeline(DiffusionPipeline, HunyuanVideoLoraLoaderMixin):
                     guidance=guidance,
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
+                    tokens=tokens,
+                    timestep_idx=i,
                 )[0]
 
                 # compute the previous noisy sample x_t -> x_t-1

@@ -34,6 +34,170 @@ from fastvideo.utils.parallel_states import get_sequence_parallel_state, nccl_in
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+import os
+import cv2
+import numpy as np
+
+def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta):
+    B, C, T, H, W = BCTHW
+    video_embed = hidden_states[0].clone().float()
+    text_actual_length = attention_mask[0, video_embed.shape[0]:].sum()
+    # 处理token文本
+    tokens = [token[1:] if token.startswith("Ġ") else token for token in tokens]
+    text_tokens = tokens[:text_actual_length]
+
+    tokens_prompt = " ".join(text_tokens[1:])
+    text_embed = encoder_hidden_states[0].clone().float()
+
+    # 解填充处理
+    text_unpadded_embed = text_embed[:text_actual_length, :]
+    
+    # 计算注意力图 [l_text, T, H, W]
+    d_k = text_unpadded_embed.shape[-1]
+    atten_map = torch.matmul(text_unpadded_embed, video_embed.transpose(0, 1)) / np.sqrt(d_k)
+    atten_map = atten_map.reshape(text_actual_length, T, H, W)
+
+    # 输出目录
+    output_dir = f"attention_maps/{tokens_prompt}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- 每个子图的目标尺寸 ---
+    subplot_height, subplot_width = 720 // 8, 1280 // 8
+    margin = 20  # 子图间距
+    title_height = 40  # 主标题高度
+    label_height = 30  # 为子图标签新增的高度
+    colorbar_width = 30  # 颜色条宽度
+    colorbar_margin = 80  # 颜色条与子图的间距
+    colorbar_height = subplot_height
+
+    frame_token_tensor_dict = {}
+    for frame_idx in range(T):
+        frame_attention = atten_map[:, frame_idx]  # [l_text, H, W]
+        
+        # --- 动态计算画布尺寸 ---
+        n_tokens = len(text_tokens)
+        max_cols = 5  # 每行最多8个子图
+        n_cols = min(n_tokens, max_cols)
+        n_rows = (n_tokens + n_cols - 1) // n_cols
+
+
+        # 总画布尺寸
+        canvas_width = n_cols * subplot_width + (n_cols + 1) * margin + colorbar_width + colorbar_margin
+        canvas_height = title_height + n_rows * (subplot_height + label_height) + (n_rows + 1) * margin
+
+        # 创建画布（白色背景）
+        canvas = np.full((canvas_height, canvas_width, 3), 255, dtype=np.uint8)
+
+        # --- 统一颜色尺度 ---
+        vmin, vmax = frame_attention.min(), frame_attention.max()
+        if vmax - vmin < 1e-6:
+            vmax = vmin + 1e-6
+
+        # --- 新增颜色条绘制 ---
+        # 生成垂直渐变色条
+        # 生成颜色条数据（正确的数值方向）
+        colorbar_values = torch.linspace(vmax, vmin, colorbar_height).to(vmin.device)  # 从大到小！顶部=max
+        normalized_values = ((colorbar_values - vmin) / (vmax - vmin) * 255).cpu().numpy().astype(np.uint8)
+
+        # 应用颜色映射（不再需要反转！）
+        colorbar = cv2.applyColorMap(normalized_values, cv2.COLORMAP_JET)
+        colorbar = cv2.resize(colorbar, (colorbar_width, subplot_height))
+        
+        # 放置颜色条（右侧居中）
+        cb_x = canvas_width - colorbar_width - colorbar_margin
+        cb_y = title_height + (canvas_height - title_height - subplot_height) // 2
+        canvas[cb_y:cb_y+subplot_height, cb_x:cb_x+colorbar_width] = colorbar
+        
+        # 添加数值标签
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        # 最大值标签（顶部）
+        cv2.putText(canvas, f"{vmax:.2f}", 
+                   (cb_x + colorbar_width + 5, cb_y + 20),
+                   font, font_scale, (0,0,0), 1, cv2.LINE_AA)
+        # 最小值标签（底部）
+        cv2.putText(canvas, f"{vmin:.2f}", 
+                   (cb_x + colorbar_width + 5, cb_y + subplot_height - 10),
+                   font, font_scale, (0,0,0), 1, cv2.LINE_AA)
+
+        token_tensor_dict = {}
+        # --- 绘制每个token的子图 ---
+        for i in range(n_tokens):
+            row = i // n_cols
+            col = i % n_cols
+            
+            # 计算子图位置（包含标签区域）
+            x_start = margin + col * (subplot_width + margin)
+            y_start = title_height + margin + row * (subplot_height + label_height + margin)
+
+            # 处理当前token的热图
+            token_attention = frame_attention[i]  # [H, W]
+            norm_attention = ((token_attention - vmin) / (vmax - vmin) * 255)
+            norm_attention = norm_attention.cpu().numpy().astype(np.uint8)
+
+            # 缩放热图
+            resized_attention = cv2.resize(norm_attention, (subplot_width, subplot_height), 
+                                         interpolation=cv2.INTER_CUBIC)
+            colored_attention = cv2.applyColorMap(resized_attention, cv2.COLORMAP_JET)
+
+            # 将热图粘贴到画布（放在标签下方）
+            canvas[y_start+label_height:y_start+label_height+subplot_height, 
+                   x_start:x_start+subplot_width] = colored_attention
+
+            # --- 在子图上方添加token标签 ---
+            text = text_tokens[i]
+            token_tensor_dict[text] = resized_attention  # save token tensor
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6  # 比子图内标签稍大
+            thickness = 1
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            
+            # 计算标签居中位置
+            text_x = x_start + (subplot_width - text_size[0]) // 2
+            text_y = y_start + label_height - 5  # 距离热图顶部5像素
+            
+            # 黑色文字（白色背景已保证可读性）
+            cv2.putText(
+                canvas, text,
+                (text_x, text_y),
+                font, font_scale, (0, 0, 0), thickness,
+                lineType=cv2.LINE_AA
+            )
+
+        # --- 添加主标题 ---
+        frame_token_tensor_dict[frame_idx] = token_tensor_dict
+        # title = f"Frame {frame_idx} | Block {blk_idx} | Timestep {timestep_idx}"
+        title = f"Timestep {timestep_idx} | Block {blk_idx} | Frame {frame_idx}"
+        title_font = cv2.FONT_HERSHEY_SIMPLEX
+        title_scale = 0.8
+        title_thickness = 2
+        title_size = cv2.getTextSize(title, title_font, title_scale, title_thickness)[0]
+        cv2.putText(
+            canvas, title,
+            ((canvas_width - title_size[0]) // 2, 30),
+            title_font, title_scale, (0, 0, 0), title_thickness,
+            lineType=cv2.LINE_AA
+        )
+
+        # --- 保存图像 ---
+        save_path = os.path.join(output_dir, f"timestep_{timestep_idx}_{meta}_blk_{blk_idx}_frame_{frame_idx}.png")
+        cv2.imwrite(save_path, canvas)
+    # save npy array
+    npy_save_dir = os.path.join("attention_maps_all", tokens_prompt)
+    os.makedirs(npy_save_dir, exist_ok=True)
+    npy_save_path = os.path.join(npy_save_dir, f"timestep_{timestep_idx}_{meta}_blk_{blk_idx}_frame_token_tensor.npy")
+    np.save(npy_save_path, frame_token_tensor_dict)
 
 def shrink_head(encoder_state, dim):
     local_heads = encoder_state.shape[dim] // nccl_info.sp_size
@@ -54,6 +218,11 @@ class HunyuanVideoAttnProcessor2_0:
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        BCTHW: Optional[Tuple[int, int, int, int]] = None,
+        blk_idx: Optional[int] = None,
+        tokens: Optional[List[int]] = None,
+        timestep_idx: Optional[int] = None,
+        meta: Optional[str] = None,
     ) -> torch.Tensor:
 
         sequence_length = hidden_states.size(1)
@@ -179,7 +348,9 @@ class HunyuanVideoAttnProcessor2_0:
 
             if getattr(attn, "to_add_out", None) is not None:
                 encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
-
+        if timestep_idx == 5: # use last timestep for vis, with higher SNR
+            my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta)
+        
         return hidden_states, encoder_hidden_states
 
 
@@ -198,8 +369,9 @@ class HunyuanVideoPatchEmbed(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.proj(hidden_states)
+        B, C, F, H, W = hidden_states.shape
         hidden_states = hidden_states.flatten(2).transpose(1, 2)  # BCFHW -> BNC
-        return hidden_states
+        return hidden_states, (B, C, F, H, W)
 
 
 class HunyuanVideoAdaNorm(nn.Module):
@@ -408,9 +580,11 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         attention_head_dim: int,
         mlp_ratio: float = 4.0,
         qk_norm: str = "rms_norm",
+        blk_idx: int = 0,
     ) -> None:
         super().__init__()
-
+        self.blk_idx = blk_idx
+        self.meta = "SingleStream"
         hidden_size = num_attention_heads * attention_head_dim
         mlp_dim = int(hidden_size * mlp_ratio)
 
@@ -439,6 +613,9 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
         temb: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        BCTHW: Optional[Tuple[int, int, int, int]] = None,
+        tokens: Optional[List[int]] = None,
+        timestep_idx: Optional[int] = None,
     ) -> torch.Tensor:
         text_seq_length = encoder_hidden_states.shape[1]
         hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim=1)
@@ -460,6 +637,11 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
             encoder_hidden_states=norm_encoder_hidden_states,
             attention_mask=attention_mask,
             image_rotary_emb=image_rotary_emb,
+            BCTHW=BCTHW,
+            blk_idx=self.blk_idx,
+            tokens=tokens,
+            timestep_idx=timestep_idx,
+            meta=self.meta,
         )
         attn_output = torch.cat([attn_output, context_attn_output], dim=1)
 
@@ -483,9 +665,11 @@ class HunyuanVideoTransformerBlock(nn.Module):
         attention_head_dim: int,
         mlp_ratio: float,
         qk_norm: str = "rms_norm",
+        blk_idx: int = 0,
     ) -> None:
         super().__init__()
-
+        self.blk_idx = blk_idx
+        self.meta = "DualStream"
         hidden_size = num_attention_heads * attention_head_dim
 
         self.norm1 = AdaLayerNormZero(hidden_size, norm_type="layer_norm")
@@ -518,6 +702,9 @@ class HunyuanVideoTransformerBlock(nn.Module):
         temb: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        BCTHW: Optional[Tuple[int, int, int, int]] = None,
+        tokens: Optional[List[int]] = None,
+        timestep_idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # 1. Input normalization
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
@@ -530,6 +717,11 @@ class HunyuanVideoTransformerBlock(nn.Module):
             encoder_hidden_states=norm_encoder_hidden_states,
             attention_mask=attention_mask,
             image_rotary_emb=freqs_cis,
+            BCTHW=BCTHW,
+            blk_idx=self.blk_idx,
+            tokens=tokens,
+            timestep_idx=timestep_idx,
+            meta=self.meta,
         )
 
         # 3. Modulation and residual connection
@@ -631,8 +823,8 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, 
 
         # 3. Dual stream transformer blocks
         self.transformer_blocks = nn.ModuleList([
-            HunyuanVideoTransformerBlock(num_attention_heads, attention_head_dim, mlp_ratio=mlp_ratio, qk_norm=qk_norm)
-            for _ in range(num_layers)
+            HunyuanVideoTransformerBlock(num_attention_heads, attention_head_dim, mlp_ratio=mlp_ratio, qk_norm=qk_norm, blk_idx=blk_idx)
+            for blk_idx in range(num_layers)
         ])
 
         # 4. Single stream transformer blocks
@@ -640,7 +832,8 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, 
             HunyuanVideoSingleTransformerBlock(num_attention_heads,
                                                attention_head_dim,
                                                mlp_ratio=mlp_ratio,
-                                               qk_norm=qk_norm) for _ in range(num_single_layers)
+                                               qk_norm=qk_norm,
+                                               blk_idx=blk_idx) for blk_idx in range(num_single_layers)
         ])
 
         # 5. Output projection
@@ -721,6 +914,8 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, 
         guidance: torch.Tensor = None,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
+        tokens: List[int] = None,
+        timestep_idx: int = 0,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         if guidance is None:
             guidance = torch.tensor([6016.0], device=hidden_states.device, dtype=torch.bfloat16)
@@ -752,7 +947,7 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, 
 
         # 2. Conditional embeddings
         temb = self.time_text_embed(timestep, guidance, pooled_projections)
-        hidden_states = self.x_embedder(hidden_states)
+        hidden_states, (B, C, T, H, W) = self.x_embedder(hidden_states)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states, timestep, encoder_attention_mask)
 
         # 3. Attention mask preparation
@@ -811,11 +1006,11 @@ class HunyuanVideoTransformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, 
         else:
             for block in self.transformer_blocks:
                 hidden_states, encoder_hidden_states = block(hidden_states, encoder_hidden_states, temb, attention_mask,
-                                                             image_rotary_emb)
+                                                             image_rotary_emb, (B, C, T, H, W), tokens, timestep_idx)
 
             for block in self.single_transformer_blocks:
                 hidden_states, encoder_hidden_states = block(hidden_states, encoder_hidden_states, temb, attention_mask,
-                                                             image_rotary_emb)
+                                                             image_rotary_emb, (B, C, T, H, W), tokens, timestep_idx)
 
         # 5. Output projection
         hidden_states = self.norm_out(hidden_states, temb)

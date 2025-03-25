@@ -34,3 +34,5 @@ dist/
 **.egg
 **.txt
 **.json
+attention_maps/
+attention_maps_all/

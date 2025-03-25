@@ -23,6 +23,27 @@ def initialize_distributed():
     initialize_sequence_parallel_state(world_size)
 
 
+def save_cross_attention(module, input, output):
+    """
+    Hook 函数，提取 Cross-Attention Map
+    """
+    print('input: ', input)
+    print('output: ', output)
+    import pdb
+    pdb.set_trace()
+
+def register_attention_hooks(model):
+    """
+    在模型的 cross-attention 层注册 hook
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, Attention):  # 找到 Attention 类
+            if "attn" in name.lower():  # 仅 hook cross-attention 层
+                module.name = name  # 记录名称，方便存储
+                module.register_forward_hook(save_cross_attention)
+                print(f"Registered hook on: {name}")
+
+
 def inference(args):
     initialize_distributed()
     print(nccl_info.sp_size)
@@ -169,6 +190,13 @@ def inference_quantization(args):
             num_inference_steps=args.num_inference_steps,
             generator=generator,
         ).frames[0]
+        import pdb
+        pdb.set_trace()
+        # save images in output path
+        output_imgs_dir = os.path.join(args.output_path, f"{prompt[:100]}")
+        os.makedirs(output_imgs_dir, exist_ok=True)
+        for i, img in enumerate(output):
+            img.save(os.path.join(output_imgs_dir, f"{i:04d}.png"))
         export_to_video(output, os.path.join(args.output_path, f"{prompt[:100]}.mp4"), fps=args.fps)
         print("Time:", round(time.perf_counter() - start_time, 2), "seconds")
         print("Max vram for denoise:", round(torch.cuda.max_memory_allocated(device="cuda") / 1024**3, 3), "GiB")

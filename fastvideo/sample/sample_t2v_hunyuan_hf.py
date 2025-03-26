@@ -190,8 +190,6 @@ def inference_quantization(args):
             num_inference_steps=args.num_inference_steps,
             generator=generator,
         ).frames[0]
-        import pdb
-        pdb.set_trace()
         # save images in output path
         output_imgs_dir = os.path.join(args.output_path, f"{prompt[:100]}")
         os.makedirs(output_imgs_dir, exist_ok=True)

@@ -607,7 +607,6 @@ class HunyuanVideoPipeline(DiffusionPipeline, HunyuanVideoLoraLoaderMixin):
         # 5. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels
         num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
-
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_channels_latents,

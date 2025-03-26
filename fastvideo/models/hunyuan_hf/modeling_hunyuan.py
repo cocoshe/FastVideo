@@ -43,10 +43,8 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-
-import os
 import cv2
-import numpy as np
+
 
 def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta):
     B, C, T, H, W = BCTHW

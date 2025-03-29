@@ -3,6 +3,7 @@ import numpy as np
 import json
 import cv2
 import os
+from tqdm import tqdm
 
 attn_maps_dir = "/home/myw/wuchangli/yk/my_ov/vd/FastVideo/attention_maps_all"
 prompts = os.listdir(attn_maps_dir)
@@ -10,7 +11,7 @@ prompts = [prompt for prompt in prompts if os.path.isdir(os.path.join(attn_maps_
 save_path = "/home/myw/wuchangli/yk/my_ov/vd/FastVideo/attention_maps_all_binary"
 os.makedirs(save_path, exist_ok=True)
 
-for prompt in prompts:
+for prompt in tqdm(prompts):
     save_path_prompt = os.path.join(save_path, prompt)
     prompt_dir = os.path.join(attn_maps_dir, prompt)
     attn_maps = os.listdir(prompt_dir)

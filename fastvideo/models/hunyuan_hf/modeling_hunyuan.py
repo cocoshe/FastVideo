@@ -44,12 +44,51 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import cv2
+import einops
+
+
+# def my_vis_attn(
+#             hidden_states, # concept_attention_dict["output_space_image_vectors"],
+#             encoder_hidden_states, # concept_attention_dict["output_space_concept_vectors"],
+#             layer_indices,
+#             timesteps,
+#             softmax,
+#         ):
+#     # 4, 19, 1, len, dim
+#     # Compute heatmaps 
+#     heatmaps = einops.einsum(
+#         hidden_states, 
+#         encoder_hidden_states,
+#         "time layers batch patches dim, time layers batch concepts dim -> time layers batch concepts patches",
+#     )
+
+
+#     # Apply softmax
+#     if softmax:
+#         heatmaps = torch.nn.functional.softmax(heatmaps, dim=-2)
+#     # Pull out the timesteps and layers
+#     heatmaps = heatmaps[timesteps]
+#     heatmaps = heatmaps[:, layer_indices]
+#     # Average over the heatmaps
+#     heatmaps = einops.reduce(
+#         heatmaps,
+#         "time layers batch concepts patches -> batch concepts patches",
+#         reduction="mean"
+#     )
+#     heatmaps = einops.rearrange(
+#         heatmaps,
+#         "batch concepts (h w) -> batch concepts h w",
+#         h=64,
+#         w=64
+#     )  # 1, l, h, w
+
+#     # return heatmaps
 
 
 def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta):
     B, C, T, H, W = BCTHW
-    video_embed = hidden_states[0].clone().float()
-    text_actual_length = attention_mask[0, video_embed.shape[0]:].sum()
+    video_embed = hidden_states[0].clone().float()  # [l_video, C]
+    text_actual_length = attention_mask[0, 0, video_embed.shape[0]:].sum()
     # 处理token文本
     tokens = [token[1:] if token.startswith("Ġ") else token for token in tokens]
     text_tokens = tokens[:text_actual_length]
@@ -58,13 +97,30 @@ def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk
     text_embed = encoder_hidden_states[0].clone().float()
 
     # 解填充处理
-    text_unpadded_embed = text_embed[:text_actual_length, :]
+    text_unpadded_embed = text_embed[:text_actual_length, :] # [l_text, C]
     
-    # 计算注意力图 [l_text, T, H, W]
-    d_k = text_unpadded_embed.shape[-1]
-    atten_map = torch.matmul(text_unpadded_embed, video_embed.transpose(0, 1)) / np.sqrt(d_k)
-    atten_map = atten_map.reshape(text_actual_length, T, H, W)
+    # #  [l_text, T, H, W]
+    # d_k = text_unpadded_embed.shape[-1]
+    # atten_map = torch.matmul(text_unpadded_embed, video_embed.transpose(0, 1)) / np.sqrt(d_k)
+    # atten_map = atten_map.reshape(text_actual_length, T, H, W)
+    video_embed_reshaped = video_embed.reshape(T, H, W, C)
+    video_embed_list = []  # [T, l_text, H, W]
+    for frame_idx in range(T):
+        frame_emb = video_embed_reshaped[frame_idx]  # H, W, C
+        heatmaps = einops.einsum(
+            text_unpadded_embed,
+            frame_emb,
+            "l_text c, h w c -> l_text h w",
+        )
+        # Apply softmax
+        # atten_map = torch.nn.functional.softmax(heatmaps, dim=0)  # [l_text, H, W]
+        atten_map = heatmaps
+        video_embed_list.append(atten_map)
+    atten_map = torch.stack(video_embed_list, dim=0).transpose(0, 1)  # [T, l_text, H, W]
 
+
+
+    # atten_map = torch.softmax(atten_map, dim=0)  # [l_text, T, H, W]
     # 输出目录
     output_dir = f"attention_maps/{tokens_prompt}"
     os.makedirs(output_dir, exist_ok=True)
@@ -81,7 +137,7 @@ def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk
     frame_token_tensor_dict = {}
     for frame_idx in range(T):
         frame_attention = atten_map[:, frame_idx]  # [l_text, H, W]
-        
+
         # --- 动态计算画布尺寸 ---
         n_tokens = len(text_tokens)
         max_cols = 5  # 每行最多8个子图
@@ -108,7 +164,7 @@ def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk
         normalized_values = ((colorbar_values - vmin) / (vmax - vmin) * 255).cpu().numpy().astype(np.uint8)
 
         # 应用颜色映射（不再需要反转！）
-        colorbar = cv2.applyColorMap(normalized_values, cv2.COLORMAP_JET)
+        colorbar = cv2.applyColorMap(normalized_values, cv2.COLORMAP_AUTUMN)
         colorbar = cv2.resize(colorbar, (colorbar_width, subplot_height))
         
         # 放置颜色条（右侧居中）
@@ -139,6 +195,8 @@ def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk
             y_start = title_height + margin + row * (subplot_height + label_height + margin)
 
             # 处理当前token的热图
+            # import pdb
+            # pdb.set_trace()
             token_attention = frame_attention[i]  # [H, W]
             norm_attention = ((token_attention - vmin) / (vmax - vmin) * 255)
             norm_attention = norm_attention.cpu().numpy().astype(np.uint8)
@@ -146,7 +204,7 @@ def my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk
             # 缩放热图
             resized_attention = cv2.resize(norm_attention, (subplot_width, subplot_height), 
                                          interpolation=cv2.INTER_CUBIC)
-            colored_attention = cv2.applyColorMap(resized_attention, cv2.COLORMAP_JET)
+            colored_attention = cv2.applyColorMap(resized_attention, cv2.COLORMAP_AUTUMN)
 
             # 将热图粘贴到画布（放在标签下方）
             canvas[y_start+label_height:y_start+label_height+subplot_height, 
@@ -346,8 +404,8 @@ class HunyuanVideoAttnProcessor2_0:
 
             if getattr(attn, "to_add_out", None) is not None:
                 encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
-        if timestep_idx == 5: # use last timestep for vis, with higher SNR
-            my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta)
+        # if timestep_idx == 5: # use last timestep for vis, with higher SNR
+        #     my_vis_attn(hidden_states, encoder_hidden_states, attention_mask, BCTHW, blk_idx, tokens, timestep_idx, meta)
         
         return hidden_states, encoder_hidden_states
 
@@ -641,6 +699,18 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
             timestep_idx=timestep_idx,
             meta=self.meta,
         )
+
+        ################################### Do Token Video Attention ###################################
+        # import pdb
+        # pdb.set_trace()
+
+        ################################################################################################
+        if timestep_idx == 5: # use last timestep for vis, with higher SNR
+            my_vis_attn(attn_output, context_attn_output, attention_mask, BCTHW, self.blk_idx, tokens, timestep_idx, self.meta)
+        
+        # my_vis_attn(attn_output, context_attn_output, attention_mask, BCTHW, self.blk_idx, tokens, timestep_idx, self.meta)        
+
+
         attn_output = torch.cat([attn_output, context_attn_output], dim=1)
 
         # 3. Modulation and residual connection
